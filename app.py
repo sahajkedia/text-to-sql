@@ -131,19 +131,23 @@ code, pre, .stCode {
     margin: 0;
     white-space: pre-wrap;
     word-wrap: break-word;
-    color: var(--text-primary) !important;
-    background: var(--bg-tertiary) !important;
+    color: #fafafa !important;
+    background: #1a1a1d !important;
     font-size: 0.9rem;
     line-height: 1.6;
     padding: 1rem;
     border-radius: 8px;
 }
 
-.sql-output pre code {
-    color: var(--text-primary) !important;
+.sql-output pre code,
+.sql-output code,
+.sql-output pre code span {
+    color: #fafafa !important;
     background: transparent !important;
+    background-color: transparent !important;
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 0.9rem;
+    -webkit-text-fill-color: #fafafa !important;
 }
 
 .sql-label {
@@ -328,6 +332,24 @@ div[data-testid="stExpander"] {
     letter-spacing: 0.08em;
     margin-bottom: 0.5rem;
 }
+
+/* Style Streamlit's native code block */
+[data-testid="stCode"] {
+    background: var(--bg-tertiary) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 10px !important;
+    margin-top: 0.5rem !important;
+}
+
+[data-testid="stCode"] pre {
+    background: transparent !important;
+    padding: 1rem !important;
+}
+
+[data-testid="stCode"] code {
+    color: #fafafa !important;
+    font-family: 'JetBrains Mono', monospace !important;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -339,6 +361,8 @@ def init_session_state():
         st.session_state.history = []
     if "current_sql" not in st.session_state:
         st.session_state.current_sql = None
+    if "current_question" not in st.session_state:
+        st.session_state.current_question = ""
     if "current_results" not in st.session_state:
         st.session_state.current_results = None
     if "db_connected" not in st.session_state:
@@ -458,12 +482,13 @@ def render_sidebar():
                 )
 
 
-def process_question(question: str):
+def generate_sql_for_question(question: str) -> str | None:
+    """Generate SQL for a question and store in session state."""
     api_key = st.session_state.openai_api_key
     
     if not api_key or not api_key.startswith("sk-"):
         st.error("Please enter your OpenAI API key in the sidebar.")
-        return
+        return None
     
     engine = get_engine(api_key)
 
@@ -476,25 +501,31 @@ def process_question(question: str):
                 st.error("Invalid API key. Please check your OpenAI API key.")
             else:
                 st.error(f"Error generating SQL: {e}")
-            return
+            return None
 
     if not sql:
         st.error("Could not generate SQL for this question.")
-        return
+        return None
 
     st.session_state.current_sql = sql
+    st.session_state.current_question = question
+    st.session_state.current_results = None  # Reset results for new query
+    return sql
 
+
+def display_sql_and_results():
+    """Display the current SQL and handle execution."""
+    if not st.session_state.current_sql:
+        return
+    
+    sql = st.session_state.current_sql
+    question = st.session_state.get("current_question", "")
+    
     st.markdown(
-        f"""
-        <div class="sql-output">
-            <div class="sql-label">
-                <span>Generated SQL</span>
-            </div>
-            <pre><code>{sql}</code></pre>
-        </div>
-    """,
+        '<div class="sql-label"><span>GENERATED SQL</span></div>',
         unsafe_allow_html=True,
     )
+    st.code(sql, language="sql")
 
     col1, col2 = st.columns([1, 4])
     with col1:
@@ -506,29 +537,18 @@ def process_question(question: str):
                 rows, columns = execute_query(sql)
 
             st.session_state.current_results = rows
-            st.session_state.history.append(
-                {
-                    "question": question,
-                    "sql": sql,
-                    "time": datetime.now().strftime("%H:%M"),
-                    "rows": len(rows),
-                }
-            )
-
-            if rows:
-                df = pd.DataFrame(rows)
-                st.markdown(
-                    f"""
-                    <div class="results-header">
-                        <span style="color: var(--text-primary); font-weight: 500;">Results</span>
-                        <span class="results-count">{len(rows)} row{'s' if len(rows) != 1 else ''}</span>
-                    </div>
-                """,
-                    unsafe_allow_html=True,
+            
+            # Add to history if not already added
+            if not any(h["sql"] == sql and h["question"] == question for h in st.session_state.history[-5:]):
+                st.session_state.history.append(
+                    {
+                        "question": question,
+                        "sql": sql,
+                        "time": datetime.now().strftime("%H:%M"),
+                        "rows": len(rows),
+                    }
                 )
-                st.dataframe(df, use_container_width=True, hide_index=True)
-            else:
-                st.info("Query executed successfully. No rows returned.")
+            st.rerun()
 
         except Exception as e:
             st.markdown(
@@ -540,6 +560,25 @@ def process_question(question: str):
             """,
                 unsafe_allow_html=True,
             )
+            return
+
+    # Display results if they exist
+    if st.session_state.current_results is not None:
+        rows = st.session_state.current_results
+        if rows:
+            df = pd.DataFrame(rows)
+            st.markdown(
+                f"""
+                <div class="results-header">
+                    <span style="color: var(--text-primary); font-weight: 500;">Results</span>
+                    <span class="results-count">{len(rows)} row{'s' if len(rows) != 1 else ''}</span>
+                </div>
+            """,
+                unsafe_allow_html=True,
+            )
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Query executed successfully. No rows returned.")
 
 
 def main():
@@ -587,9 +626,12 @@ POSTGRES_PASSWORD=your_password
         submitted = st.button("Generate SQL", use_container_width=True)
 
     if submitted and question.strip():
-        process_question(question.strip())
+        generate_sql_for_question(question.strip())
     elif submitted:
         st.warning("Please enter a question.")
+    
+    # Always display SQL and results if they exist in session state
+    display_sql_and_results()
 
 
 if __name__ == "__main__":
